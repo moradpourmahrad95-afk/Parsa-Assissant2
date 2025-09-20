@@ -1,0 +1,355 @@
+// ReminderPWA - Full-stack starter (Frontend + Backend instructions)
+// This single document contains a complete starter for a progressive web app (PWA)
+// that lets users create events with an exact date/time and a reminder date/time.
+// At the reminder time the server will send a push notification to the device using
+// the Web Push protocol (web-push / VAPID). Works on Android/Chrome/Edge/desktop
+// (iOS support depends on browser capabilities).
+
+/*
+Project structure (what you'll create from this file):
+
+/ reminder-pwa/
+  /client/    <-- React app (create-react-app or Vite)
+    public/
+      manifest.json
+      sw.js        <-- service worker for push
+      index.html
+    src/
+      App.jsx
+      index.jsx
+      push.js      <-- helper to subscribe
+  /server/
+    index.js      <-- Express + web-push scheduler
+    package.json
+  README.md
+
+Below are the files and code. Copy them into your project folders.
+*/
+
+/* =====================
+   CLIENT: public/manifest.json
+   ===================== */
+
+const manifest_json = `{
+  "name": "Reminder PWA",
+  "short_name": "RemindMe",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#111827",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}`;
+
+/* =====================
+   CLIENT: public/sw.js  (Service Worker - listens for push and shows notification)
+   ===================== */
+
+const sw_js = `self.addEventListener('push', function(event) {
+  let data = { title: 'Reminder', body: 'You have a reminder', url: '/' };
+  if (event.data) {
+    try { data = event.data.json(); } catch (e) { data = { body: event.data.text() }; }
+  }
+
+  const options = {
+    body: data.body,
+    data: { url: data.url, payload: data },
+    badge: '/icons/icon-192.png',
+    icon: '/icons/icon-192.png',
+    renotify: true,
+    tag: data.tag || 'reminder-tag'
+  };
+
+  event.waitUntil(
+    self.registration.showNotification(data.title, options)
+  );
+});
+
+self.addEventListener('notificationclick', function(event) {
+  event.notification.close();
+  const url = event.notification.data && event.notification.data.url ? event.notification.data.url : '/';
+  event.waitUntil(clients.matchAll({ type: 'window' }).then( windowClients => {
+    for (let client of windowClients) {
+      if (client.url === url && 'focus' in client) return client.focus();
+    }
+    if (clients.openWindow) return clients.openWindow(url);
+  }));
+});`;
+
+/* =====================
+   CLIENT: src/push.js  (subscribe helper)
+   ===================== */
+
+const push_js = `// push.js - helper to register service worker and subscribe to Push
+export async function registerServiceWorkerAndSubscribe(vapidPublicKey) {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+    throw new Error('Push notifications are not supported in this browser.');
+  }
+
+  const reg = await navigator.serviceWorker.register('/sw.js');
+  const permission = await Notification.requestPermission();
+  if (permission !== 'granted') throw new Error('Notification permission denied');
+
+  const existing = await reg.pushManager.getSubscription();
+  if (existing) return existing;
+
+  const convertedVapidKey = urlBase64ToUint8Array(vapidPublicKey);
+  const subscription = await reg.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: convertedVapidKey
+  });
+  return subscription;
+}
+
+function urlBase64ToUint8Array(base64String) {
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; ++i) outputArray[i] = rawData.charCodeAt(i);
+  return outputArray;
+}
+`;
+
+/* =====================
+   CLIENT: src/App.jsx  (React UI)
+   ===================== */
+
+const app_jsx = `import React, { useState, useEffect } from 'react';
+import { registerServiceWorkerAndSubscribe } from './push';
+
+export default function App(){
+  const [vapidPublic, setVapidPublic] = useState(null);
+  const [subscription, setSubscription] = useState(null);
+  const [form, setForm] = useState({ title: '', eventAt: '', remindAt: '', message: '' });
+  const [status, setStatus] = useState('');
+
+  useEffect(()=>{
+    fetch('/api/vapidPublic').then(r=>r.json()).then(j=>setVapidPublic(j.key)).catch(()=>{});
+  },[]);
+
+  async function handleSubscribe(){
+    try{
+      const sub = await registerServiceWorkerAndSubscribe(vapidPublic);
+      await fetch('/api/subscribe', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(sub) });
+      setSubscription(sub);
+      setStatus('Subscribed for push notifications ✅');
+    }catch(e){ setStatus('Subscribe failed: '+e.message); }
+  }
+
+  async function handleCreate(e){
+    e.preventDefault();
+    // basic validation
+    if(!form.title || !form.eventAt || !form.remindAt) return setStatus('همه فیلدها را پر کنید');
+    const payload = { ...form };
+    const res = await fetch('/api/reminders', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
+    if(res.ok) setStatus('یادآوری ثبت شد ✅'); else setStatus('ثبت خطا');
+  }
+
+  return (
+    <div style={{fontFamily:'Vazirmatn, Arial, sans-serif', maxWidth:720, margin:'30px auto', padding:20}}>
+      <h1 style={{color:'#111827'}}>RemindMe — ایجاد یادآوری</h1>
+      <p style={{color:'#374151'}}>سایتی که روی گوشی/تبلت/دسکتاپ نصب می‌شود (PWA). برای نمایش پیام در زمان یادآوری، ابتدا اعلان‌ها را فعال کنید و روی "عضویت" بزنید.</p>
+
+      <div style={{margin:'16px 0'}}>
+        <button onClick={handleSubscribe} disabled={!vapidPublic} style={{padding:'10px 14px', borderRadius:8}}>عضویت در اعلان‌ها</button>
+        <div style={{marginTop:8, color:'#6b7280'}}>{status}</div>
+      </div>
+
+      <form onSubmit={handleCreate} style={{display:'grid', gap:12}}>
+        <input placeholder='موضوع رویداد' value={form.title} onChange={e=>setForm({...form,title:e.target.value})} />
+        <label>زمان دقیق رویداد:</label>
+        <input type='datetime-local' value={form.eventAt} onChange={e=>setForm({...form,eventAt:e.target.value})} />
+        <label>زمان یادآوری:</label>
+        <input type='datetime-local' value={form.remindAt} onChange={e=>setForm({...form,remindAt:e.target.value})} />
+        <textarea placeholder='متن پیام یادآوری (اختیاری)' value={form.message} onChange={e=>setForm({...form,message:e.target.value})} />
+        <button type='submit' style={{padding:'10px 14px', borderRadius:8}}>ثبت یادآوری</button>
+      </form>
+
+      <hr style={{marginTop:20}} />
+      <small style={{color:'#9ca3af'}}>نکته: برای کارکرد پیغام در زمان مشخص، سرور باید در دسترس باشد تا در زمان یادآوری به Push subscription ارسال کند.</small>
+    </div>
+  );
+}
+`;
+
+/* =====================
+   CLIENT: src/index.jsx
+   ===================== */
+
+const index_jsx = `import React from 'react';
+import { createRoot } from 'react-dom/client';
+import App from './App';
+
+createRoot(document.getElementById('root')).render(<App/>);
+`;
+
+/* =====================
+   SERVER: server/index.js  (Express + web-push + simple scheduler)
+   ===================== */
+
+const server_index_js = `// server/index.js
+// Simple server that stores subscriptions and scheduled reminders in-memory (for demo).
+// Production: use a persistent DB and robust scheduler (bull, agenda, cron + durable storage).
+
+const express = require('express');
+const webpush = require('web-push');
+const bodyParser = require('body-parser');
+const cors = require('cors');
+
+const app = express();
+app.use(cors());
+app.use(bodyParser.json());
+app.use(express.static('client/build'));
+
+// Generate VAPID keys once and reuse. In production store them securely.
+// You can generate keys with web-push generate-vapid-keys
+const vapidKeys = webpush.generateVAPIDKeys();
+console.log('VAPID Public Key:', vapidKeys.publicKey);
+webpush.setVapidDetails('mailto:you@example.com', vapidKeys.publicKey, vapidKeys.privateKey);
+
+// In-memory stores (replace with DB in production)
+const subscriptions = []; // array of PushSubscription objects
+const reminders = []; // { id, title, eventAt, remindAt, message, subscriptionIndexes }
+
+app.get('/api/vapidPublic', (req,res)=>{
+  res.json({ key: vapidKeys.publicKey });
+});
+
+app.post('/api/subscribe', (req,res)=>{
+  const sub = req.body;
+  // naive dedupe
+  if (!subscriptions.find(s => JSON.stringify(s) === JSON.stringify(sub))) subscriptions.push(sub);
+  res.json({ ok:true });
+});
+
+app.post('/api/reminders', (req,res)=>{
+  const { title, eventAt, remindAt, message } = req.body;
+  const id = Date.now() + Math.floor(Math.random()*1000);
+  reminders.push({ id, title, eventAt, remindAt, message });
+  // schedule sending
+  scheduleReminder(id);
+  res.json({ ok:true, id });
+});
+
+async function scheduleReminder(id){
+  const r = reminders.find(x=>x.id===id);
+  if(!r) return;
+  const remindTime = new Date(r.remindAt).getTime();
+  const now = Date.now();
+  const delay = Math.max(0, remindTime - now);
+  // setTimeout is fine for demo; production: use persistent job queue (BullMQ/Agenda) so restarts don't lose jobs
+  setTimeout(async ()=>{
+    const payload = {
+      title: 'یادآوری — ' + r.title,
+      body: r.message || `رویداد در ${r.eventAt}`,
+      url: '/',
+      tag: `reminder-${r.id}`
+    };
+    // send to all subscriptions (in demo). In production send only to the user's subscription(s)
+    for(const sub of subscriptions){
+      try{
+        await webpush.sendNotification(sub, JSON.stringify(payload));
+      }catch(e){ console.error('push failed', e); }
+    }
+  }, delay);
+}
+
+// health
+app.get('/api/health', (req,res)=>res.json({ ok:true }));
+
+const PORT = process.env.PORT || 4000;
+app.listen(PORT, ()=> console.log('Server listening on', PORT));
+`;
+
+/* =====================
+   SERVER: package.json
+   ===================== */
+
+const server_pkg = `{
+  "name": "reminder-pwa-server",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": { "start": "node index.js" },
+  "dependencies": {
+    "express": "^4.18.2",
+    "web-push": "^3.5.0",
+    "body-parser": "^1.20.2",
+    "cors": "^2.8.5"
+  }
+}`;
+
+/* =====================
+   README (instructions)
+   ===================== */
+
+const readme = `# Reminder PWA - Quickstart
+
+## Overview
+این پروژه یک نمونه کامل است که شامل یک PWA فرانت‌اند (React) و یک سرور Node.js است که از Web Push (VAPID) برای ارسال اعلان زمان‌بندی شده استفاده می‌کند. وقتی کاربر روی "عضویت در اعلان‌ها" کلیک کند، مرورگر او یک Push Subscription تولید می‌کند و سرور آن را ذخیره می‌کند. سپس وقتی یادآوری زمان رسید، سرور یک اعلان Push به اشتراک‌ها ارسال می‌کند که Service Worker روی دستگاه آن را نمایش می‌دهد.
+
+## نکات مهم
+- مرورگر باید از Push & Service Worker پشتیبانی کند (Chrome/Edge/Firefox در اندروید و دسکتاپ خوب کار می‌کنند). iOS دارای محدودیت‌های تاریخی برای Push، بسته به نسخه iOS ممکن است کار نکند.
+- در این نمونه از حافظه درون‌فرآیندی استفاده شده؛ برای تولیدی شدن از DB (Postgres/Mongo) و job queue (BullMQ، agenda، یا cron) استفاده کنید.
+- VAPID keys را تولید و امن نگهدارید. در این کد برای سادگی هر بار ساخته می‌شود — در سرور واقعی باید ثابت بماند.
+
+## نصب سریع (local demo)
+1. ساخت فولدرها: client و server
+2. داخل client یک React app (Vite یا CRA). کدهای بالا در src و public قرار دهند.
+3. در server، فایل index.js و package.json را ایجاد کنید و سپس:
+   npm install
+   node index.js
+4. Build فرانت‌اند و پوشه build را در server/static قرار دهید یا پروکسی به dev server کنید.
+
+## چه چیزی در این فایل وجود دارد؟
+- Service Worker: public/sw.js
+- Frontend React: src/App.jsx ، src/push.js
+- Backend: server/index.js با web-push
+
+## بهبود‌ها
+- ذخیره‌سازی عملی (DB)
+- ارسال فقط به سابسکریپشن‌های کاربر
+- تایید و احراز هویت (JWT)
+- مدیریت زمان‌بندی مقاوم (job queue)
+- زیباتر کردن UI و ترجمه‌ها
+
+`;
+
+/* =====================
+   Create combined single text for the canvas file so the user can copy-paste
+   ===================== */
+
+const combined = `# Reminder PWA — Starter
+
+این فایل شامل همه قطعات لازم برای پیاده‌سازی یک PWA یادآور است. فایل‌ها را مطابق ساختار پروژه جدا کنید.
+
+--- manifest.json ---
+${manifest_json}
+
+--- public/sw.js ---
+${sw_js}
+
+--- src/push.js ---
+${push_js}
+
+--- src/App.jsx ---
+${app_jsx}
+
+--- src/index.jsx ---
+${index_jsx}
+
+--- server/index.js ---
+${server_index_js}
+
+--- server/package.json ---
+${server_pkg}
+
+--- README.md ---
+${readme}
+`;
+
+// Return the combined file as the document content
+
+return combined;
